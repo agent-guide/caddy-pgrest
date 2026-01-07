@@ -1,0 +1,6 @@
+http://127.0.0.1:3000 {
+	bind 127.0.0.1
+	route /graphql {
+		pgrest "postgres://user:passwd@localhost:5432/graphqldb"
+	}
+}
