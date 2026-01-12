@@ -1,0 +1,17 @@
+
+http://127.0.0.1:3000 {
+	bind 127.0.0.1
+
+	# Simple Syntax
+	route /graphql {
+		pgrest_graphql db_url table_name
+	}
+
+	# Block Syntax
+	route /news/graphql {
+		pgrest_graphql {
+			db_url "postgres://user:passwd@localhost:5432/graphqldb"
+			table_name "news"
+		}
+	}
+}
