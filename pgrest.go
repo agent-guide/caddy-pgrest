@@ -40,7 +40,10 @@ func (m *PGRestHandler) validateGraphQLQuery(query string) error {
 	if m.TableName == "" {
 		return fmt.Errorf("table_name is not configured")
 	}
-	tableName := m.TableName + "Collection"
+	tableName := "*"
+	if m.TableName != "*" {
+		tableName = m.TableName + "Collection"
+	}
 
 	// Remove GraphQL comments (# ...)
 	cleanQuery := query
@@ -52,6 +55,10 @@ func (m *PGRestHandler) validateGraphQLQuery(query string) error {
 	topLevelContent := extractTopLevelSelection(cleanQuery)
 	if topLevelContent == "" {
 		return fmt.Errorf("invalid GraphQL query: cannot find top-level selection set")
+	}
+
+	if tableName == "*" {
+		return nil
 	}
 
 	// Extract top-level field names from the selection set
@@ -170,7 +177,7 @@ func (m *PGRestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next c
 		return fmt.Errorf("invalid pgrest reqeust: %v", err)
 	}
 
-	m.logger.Info("pgrest ServerHttp",
+	m.logger.Debug("pgrest ServerHttp",
 		zap.String("GraphQLRequestQuery", reqData.Query),
 		zap.String("GraphQLRequestOperationName", reqData.OperationName),
 	)
