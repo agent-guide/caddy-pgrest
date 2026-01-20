@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -31,6 +33,92 @@ type GraphQLRequest struct {
 	Query         string                 `json:"query"`
 	Variables     map[string]interface{} `json:"variables"`
 	OperationName string                 `json:"operationName"`
+}
+
+// validateGraphQLQuery checks if the query only accesses the allowed table
+func (m *PGRestHandler) validateGraphQLQuery(query string) error {
+	if m.TableName == "" {
+		return fmt.Errorf("table_name is not configured")
+	}
+	tableName := m.TableName + "Collection"
+
+	// Remove GraphQL comments (# ...)
+	cleanQuery := query
+	re := regexp.MustCompile(`#.*$`)
+	cleanQuery = re.ReplaceAllString(cleanQuery, "")
+
+	// Find the top-level selection set (the first { after query/mutation/subscription)
+	// Extract content between the first { and matching }
+	topLevelContent := extractTopLevelSelection(cleanQuery)
+	if topLevelContent == "" {
+		return fmt.Errorf("invalid GraphQL query: cannot find top-level selection set")
+	}
+
+	// Extract top-level field names from the selection set
+	topLevelFields := extractTopLevelFields(topLevelContent)
+
+	// Check if any top-level field is not the allowed table
+	for _, field := range topLevelFields {
+		if field != tableName {
+			return fmt.Errorf("permission denied: access to table '%s' is not allowed", field)
+		}
+	}
+
+	return nil
+}
+
+// extractTopLevelSelection extracts the content of the first top-level selection set
+func extractTopLevelSelection(query string) string {
+	// Remove query/mutation/subscription keyword if present
+	cleaned := regexp.MustCompile(`^\s*(query|mutation|subscription)\s*\w*\s*\{`).ReplaceAllString(query, "{")
+
+	// Find the first opening brace
+	firstBrace := strings.Index(cleaned, "{")
+	if firstBrace == -1 {
+		return ""
+	}
+
+	// Find the matching closing brace
+	braceCount := 0
+	start := firstBrace
+	for i := start; i < len(cleaned); i++ {
+		if cleaned[i] == '{' {
+			braceCount++
+		} else if cleaned[i] == '}' {
+			braceCount--
+			if braceCount == 0 {
+				return cleaned[start+1 : i]
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractTopLevelFields extracts field names from a selection set
+// This only extracts fields at the current level, not nested ones
+func extractTopLevelFields(selection string) []string {
+	var fields []string
+
+	// Split by braces to isolate top-level content
+	parts := strings.Split(selection, "{")
+	if len(parts) == 0 {
+		return fields
+	}
+
+	// The first part contains top-level field names
+	topLevelPart := parts[0]
+
+	// Extract field names (alphanumeric words followed by arguments or braces)
+	fieldPattern := regexp.MustCompile(`(\w+)\s*(?:\(|\{)`)
+	matches := fieldPattern.FindAllStringSubmatch(topLevelPart, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			fields = append(fields, match[1])
+		}
+	}
+
+	return fields
 }
 
 // CaddyModule returns the Caddy module information.
@@ -65,7 +153,7 @@ func (m *PGRestHandler) Validate() error {
 }
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
-func (m PGRestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+func (m *PGRestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	contentType := r.Header.Get("Content-Type")
 	if contentType != "application/json" {
 		m.logger.Info("pgrest ServerHttp",
@@ -81,10 +169,24 @@ func (m PGRestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 	if err != nil {
 		return fmt.Errorf("invalid pgrest reqeust: %v", err)
 	}
-	m.logger.Debug("pgrest ServerHttp",
+
+	m.logger.Info("pgrest ServerHttp",
 		zap.String("GraphQLRequestQuery", reqData.Query),
 		zap.String("GraphQLRequestOperationName", reqData.OperationName),
 	)
+
+	// Validate that the query only accesses the allowed table
+	if err := m.validateGraphQLQuery(reqData.Query); err != nil {
+		m.logger.Warn("pgrest permission denied",
+			zap.String("table", m.TableName),
+			zap.Error(err),
+		)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		response := map[string]string{"error": err.Error()}
+		json.NewEncoder(w).Encode(response)
+		return fmt.Errorf("permission denied: %v", err)
+	}
 
 	var result []byte
 	err = m.pool.QueryRow(
